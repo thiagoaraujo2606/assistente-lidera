@@ -1,18 +1,25 @@
 import streamlit as st
 import pandas as pd
 import google.generativeai as genai
+import altair as alt
+from datetime import datetime
+import json
 
-# --- CONFIGURAÇÃO DA API DO GEMINI ---
+# --- CONFIGURAÇÃO DA PÁGINA E API ---
+st.set_page_config(
+    page_title="Assistente Lidera Assessments",
+    page_icon="📊",
+    layout="wide"
+)
+
 try:
     genai.configure(api_key=st.secrets["GEMINI_API_KEY"])
     model = genai.GenerativeModel('gemini-1.5-flash')
     gemini_configurado = True
-except Exception as e:
-    st.error(f"Erro ao configurar a API do Gemini: {e}. Verifique seu arquivo .streamlit/secrets.toml")
+except Exception:
     gemini_configurado = False
 
-# --- FUNÇÕES DE LÓGICA DE ANÁLISE (Sem alterações) ---
-
+# --- FUNÇÕES DE LÓGICA DE ANÁLISE (A maioria sem alterações) ---
 def classificar_esforco(valor_adaptacao):
     if valor_adaptacao <= 1.0: return "Baixo esforço de adaptação"
     if 1.0 < valor_adaptacao <= 2.0: return "Esforço de adaptação moderado"
@@ -26,115 +33,220 @@ def analisar_disc(dados_df):
     for fator in fatores_disc:
         coluna_natural, coluna_work = f"{fator} Natural", f"{fator} Work"
         if coluna_natural in dados_df.columns and coluna_work in dados_df.columns:
-            natural_val = dados_df[coluna_natural].iloc[0]
-            work_val = dados_df[coluna_work].iloc[0]
-            adaptacao = abs(work_val - natural_val)
-            resultados[fator] = {
-                "Natural": natural_val,
-                "Adaptado": work_val,
-                "Adaptação": adaptacao,
-                "Nível de Esforço": classificar_esforco(adaptacao)
-            }
+            natural_val = pd.to_numeric(dados_df[coluna_natural].iloc[0], errors='coerce')
+            work_val = pd.to_numeric(dados_df[coluna_work].iloc[0], errors='coerce')
+            if pd.notna(natural_val) and pd.notna(work_val):
+                adaptacao = abs(work_val - natural_val)
+                resultados[fator] = { "Natural": natural_val, "Adaptado": work_val, "Adaptação": adaptacao, "Nível de Esforço": classificar_esforco(adaptacao) }
     return resultados
 
-def analisar_motivadores(dados_df):
-    resultados = {"Paixões": [], "Menores Motivadores": []}
-    motivadores = ["Conhecimento e Descoberta:", "Retorno sobre Investimento (ROI):", "Estética:", "Ajudar os Outros:", "Princípios Orientadores:", "Liderança:", "Paz e Harmonia:"]
-    for m in motivadores:
-        if m in dados_df.columns:
-            score = dados_df[m].iloc[0]
-            if score > 7.0:
-                resultados["Paixões"].append(f"{m.replace(':', '')} ({score})")
-    return resultados
+def criar_grafico_disc(dados_analise_disc):
+    dados_grafico = []
+    for fator, valores in dados_analise_disc.items():
+        dados_grafico.append({"Fator": fator, "Tipo de Perfil": "Natural", "Pontuação": valores["Natural"]})
+        dados_grafico.append({"Fator": fator, "Tipo de Perfil": "Adaptado", "Pontuação": valores["Adaptado"]})
+    df_grafico = pd.DataFrame(dados_grafico)
+    grafico = alt.Chart(df_grafico).mark_bar(cornerRadiusTopLeft=3, cornerRadiusTopRight=3).encode(
+        x=alt.X('Fator:N', title='Fator DISC', sort=None, axis=alt.Axis(labelAngle=0)),
+        y=alt.Y('Pontuação:Q', title='Pontuação'),
+        color=alt.Color('Tipo de Perfil:N', title='Tipo de Perfil', scale=alt.Scale(range=['#2A70B8', '#FF4B4B'])),
+        xOffset='Tipo de Perfil:N'
+    ).properties(title='Comparativo de Perfis DISC: Natural vs. Adaptado')
+    return grafico
 
-def analisar_axiologia(dados_df):
-    resultados = {"Pontos Fortes": [], "Oportunidades de Melhoria": []}
-    competencias = ["Foco no Cliente", "Autoconfiança", "Liderando outros"]
-    for c in competencias:
-        if c in dados_df.columns:
-            score = dados_df[c].iloc[0]
-            if score > 6.7:
-                resultados["Pontos Fortes"].append(f"{c} ({score})")
-            else:
-                resultados["Oportunidades de Melhoria"].append(f"{c} ({score})")
-    if 'Confiabilidade (Reliability)' in dados_df.columns:
-        resultados["Confiabilidade"] = dados_df['Confiabilidade (Reliability)'].iloc[0]
-    return resultados
-
+# --- CORREÇÃO: Função de relatório agora pede e processa JSON ---
 def gerar_relatorio_final(dados_df):
-    with st.spinner('Realizando análises e consultando a IA para gerar o relatório completo...'):
+    with st.spinner('Analisando dados e consultando a IA...'):
         analise_disc_data = analisar_disc(dados_df)
-        analise_motivadores_data = analisar_motivadores(dados_df)
-        analise_axiologia_data = analisar_axiologia(dados_df)
-        resumo_para_ia = f"""
-        **Dados do(a) Avaliado(a):** - Nome: {dados_df['Assessment Taker Name'].iloc[0]}
-        **Análise Comportamental (DISC):** - Análise de Adaptação e Estresse: {analise_disc_data}
-        **Análise Motivacional:** - Paixões (motivadores > 7.0): {analise_motivadores_data['Paixões']}
-        **Análise de Competências (Axiologia):** - Confiabilidade (Reliability): {analise_axiologia_data.get('Confiabilidade', 'N/A')} - Pontos Fortes (competências > 6.7): {analise_axiologia_data['Pontos Fortes']} - Oportunidades de Melhoria: {analise_axiologia_data['Oportunidades de Melhoria']}
-        """
+        resumo_para_ia = f"**Análise Comportamental (DISC):** {analise_disc_data}"
+        
         prompt_final = f"""
-        Aja como o Assistente de Análise Virtual da Lidera Assessments, conforme o manual de identidade fornecido.
-        Sua tarefa é gerar um relatório de análise combinada para um(a) avaliado(a).
-        Use os dados estruturados fornecidos abaixo para preencher os 12 itens do relatório. Siga rigorosamente a estrutura e a formatação solicitadas no manual.
-        Seja profissional, objetivo e use os dados para justificar suas conclusões. Refira-se ao indivíduo sempre como "O(A) Avaliado(a)".
+        Aja como o Assistente de Análise Virtual da Lidera Assessments. Sua tarefa é gerar o conteúdo para um relatório de análise combinada.
+        **Sua resposta deve ser OBRIGATORIAMENTE um objeto JSON válido.**
+        O JSON deve ter chaves para cada um dos 12 itens do relatório. O valor de cada chave deve ser o texto correspondente para aquela seção.
+        Use os dados estruturados fornecidos para elaborar o conteúdo de cada seção.
+        REGRAS: Refira-se ao indivíduo sempre como "O(A) Avaliado(a)". Substitua "scores" por "pontuações".
 
-        **DADOS ESTRUTURADOS PARA ANÁLISE:**
+        DADOS ESTRUTURADOS PARA ANÁLISE:
         {resumo_para_ia}
 
-        **ESTRUTURA FINAL DO RELATÓRIO (Sequência Obrigatória):**
-        Gere um relatório que contenha exatamente os seguintes 12 títulos, nesta ordem. Elabore o conteúdo de cada item com base nos dados fornecidos.
-
-        1.  **Objetivo da Análise**
-        2.  **Data da Avaliação Mais Recente** (Use a data de hoje para este exemplo)
-        3.  **Dados Considerados** (Resuma as principais pontuações de cada avaliação)
-        4.  **Potenciais Profissões Compatíveis** (Sugira com base nos pontos fortes)
-        5.  **Parecer Geral da Análise** (Crie um resumo geral)
-        6.  **Nível de Correspondência com o Cargo** (Assuma um cargo genérico de 'Liderança' e justifique)
-        7.  **Vantagens e Pontos Fortes para a Função**
-        8.  **Oportunidades de Melhoria**
-        9.  **Análise de Estresse e Adaptação DISC** (Detalhe a análise dos fatores DISC)
-        10. **Análise dos Vieses Comportamentais da Axiologia** (Como não temos dados de viés, informe "Dados não fornecidos para esta análise")
-        11. **Análise do QP e a influência dos Sabotadores** (Informe "Dados não fornecidos para esta análise")
-        12. **Importante** (Use o texto obrigatório do seu manual)
+        ESTRUTURA JSON OBRIGATÓRIA (preencha os valores):
+        {{
+          "objetivo_analise": "...",
+          "data_avaliacao": "{datetime.now().strftime('%d/%m/%Y')}",
+          "dados_considerados": "...",
+          "profissoes_compativeis": "...",
+          "parecer_geral": "...",
+          "correspondencia_cargo": "...",
+          "vantagens_fortes": "...",
+          "oportunidades_melhoria": "...",
+          "analise_disc": "...",
+          "analise_vieses": "Dados não fornecidos para esta análise.",
+          "analise_qp": "Dados não fornecidos para esta análise.",
+          "importante": "Em resumo, a análise combinada destas avaliações, embora valiosa, exige uma abordagem cautelosa e multifacetada..."
+        }}
         """
         try:
             response = model.generate_content(prompt_final)
-            return response.text
-        except Exception as e:
-            return f"Ocorreu um erro na IA: {e}"
+            # Limpa e parseia a resposta JSON da IA
+            json_text = response.text.strip().replace("```json", "").replace("```", "")
+            report_data = json.loads(json_text)
+            return report_data, analise_disc_data
+        except (json.JSONDecodeError, Exception) as e:
+            st.error(f"Houve um erro ao processar a resposta da IA. Detalhes: {e}")
+            st.text_area("Resposta bruta da IA", response.text)
+            return None, None
 
-# --- INTERFACE GRÁFICA (UI) ---
-st.set_page_config(layout="wide")
-st.title("Assistente de Análise Virtual - Lidera Assessments")
+def responder_chat(pergunta, relatorio_gerado_dict, dados_pessoa):
+    # Converte o dicionário do relatório em texto para o contexto
+    relatorio_texto = "\n".join([f"**{key.replace('_', ' ').title()}**: {value}" for key, value in relatorio_gerado_dict.items()])
+    base_conhecimento = f"""
+    CONTEXTO PRINCIPAL: O RELATÓRIO GERADO
+    ---
+    {relatorio_texto}
+    ---
+    REGRAS DE ANÁLISE: A "Adaptação" DISC é a diferença absoluta entre Natural e Adaptado. > 3.0 é "Potencial estresse".
+    DADOS BRUTOS:
+    {dados_pessoa.to_string()}
+    """
+    prompt_chat = f"""
+    Você é um assistente especialista que ajuda a interpretar um relatório de avaliação.
+    Sua fonte primária de conhecimento é o contexto fornecido. Priorize respostas baseadas nele.
+    Para saudações ou perguntas gerais, responda de forma amigável e concisa.
 
-uploaded_file = st.file_uploader("Carregue aqui o arquivo CSV com os dados combinados", type=["csv"])
+    Base de Conhecimento: {base_conhecimento}
+    Pergunta do Usuário: "{pergunta}"
+    Sua Resposta:
+    """
+    try:
+        response = model.generate_content(prompt_chat)
+        return response.text
+    except Exception as e:
+        return f"Ocorreu um erro na IA do chat: {e}"
+
+# --- INTERFACE GRÁFICA (UI) FINAL ---
+
+st.title("Assistente de Análise Virtual Personalizado")
+st.caption("Lidera Assessments®")
+
+# CORREÇÃO: Injeta CSS para o layout do chat
+st.markdown("""
+<style>
+    .chat-container {
+        display: flex;
+        flex-direction: column;
+    }
+    .chat-message {
+        padding: 0.75rem;
+        border-radius: 0.5rem;
+        margin-bottom: 0.5rem;
+        max-width: 100%;
+        word-wrap: break-word;
+    }
+    .user-message {
+        background-color: #fce8cc;
+        align-self: flex-end;
+    }
+    .assistant-message {
+        background-color: #fcf3e6;
+        align-self: flex-start;
+    }
+    .st-expander > div:first-child > div:first-child p {
+    font-weight: bold !important;
+    font-size: 2em !important; /* Aumenta em 10% */
+    }        
+</style>
+""", unsafe_allow_html=True)
+
+
+if 'analise_completa' not in st.session_state:
+    st.session_state.analise_completa = None
+if 'chat_history' not in st.session_state:
+    st.session_state.chat_history = []
+
+uploaded_file = st.file_uploader("Para começar, carregue o arquivo CSV com os dados da avaliação", type=["csv"])
 
 if uploaded_file is not None:
-    try:
-        dados_brutos = pd.read_csv(uploaded_file)
+    dados_brutos = pd.read_csv(uploaded_file)
+    st.markdown("---")
+    st.subheader("Seleção de Perfil")
+    
+    col1, col2 = st.columns([2, 1])
+    with col1:
+        pessoa_selecionada = st.selectbox("Escolha o perfil para analisar", options=dados_brutos['Assessment Taker Name'].unique())
+    with col2:
+        analyze_button = st.button("Gerar Relatório 📈", type="primary", use_container_width=True, disabled=not gemini_configurado)
+
+    if analyze_button:
+        dados_pessoa = dados_brutos[dados_brutos['Assessment Taker Name'] == pessoa_selecionada]
+        if not dados_pessoa.empty:
+            report_data_dict, analise_disc_detalhada = gerar_relatorio_final(dados_pessoa)
+            if report_data_dict:
+                st.session_state.analise_completa = {
+                    "relatorio_dict": report_data_dict,
+                    "grafico_disc_data": analise_disc_detalhada,
+                    "dados_pessoa": dados_pessoa
+                }
+                st.session_state.chat_history = [{
+                    "role": "assistant",
+                    "content": "Olá! O relatório foi gerado. Use o chat abaixo para tirar dúvidas sobre os resultados."
+                }]
+        else:
+            st.error("Não foi possível encontrar os dados para a pessoa selecionada.")
+            st.session_state.analise_completa = None
+
+if st.session_state.analise_completa:
+    st.markdown("---")
+    st.header(f"Resultados da Análise para: {st.session_state.analise_completa['dados_pessoa']['Assessment Taker Name'].iloc[0]}")
+    
+    report_dict = st.session_state.analise_completa["relatorio_dict"]
+    
+    # 1. Relatório Formatado com Expanders
+    st.subheader("📄 Relatório Completo")
+    titulos = {
+        "objetivo_analise": "🎯 Objetivo da Análise", "data_avaliacao": "📅 Data da Avaliação Mais Recente",
+        "dados_considerados": "🗂️ Dados Considerados", "profissoes_compativeis": "🚀 Potenciais Profissões Compatíveis",
+        "parecer_geral": "💡 Parecer Geral da Análise", "correspondencia_cargo": "👔 Nível de Correspondência com o Cargo",
+        "vantagens_fortes": "🌟 Vantagens e Pontos Fortes", "oportunidades_melhoria": "🌱 Oportunidades de Melhoria",
+        "analise_disc": "🔄 Análise de Estresse e Adaptação DISC", "analise_vieses": "🔍 Análise de Vieses",
+        "analise_qp": "🧠 Análise de QP e Sabotadores", "importante": "❗ Importante"
+    }
+    for key, titulo in titulos.items():
+        with st.expander(titulo, expanded=True):
+            st.markdown(report_dict.get(key, "Não disponível."))
+    
+    st.markdown("---")
+
+    # 2. Gráfico
+    st.subheader("📊 Análise Gráfica")
+    if st.session_state.analise_completa["grafico_disc_data"]:
+        grafico = criar_grafico_disc(st.session_state.analise_completa["grafico_disc_data"])
+        st.altair_chart(grafico, use_container_width=True)
+    
+    st.markdown("---")
+
+    # 3. Chat Interativo
+    st.subheader("💬 Converse com a IA sobre este Relatório")
+
+    chat_container = st.container(height=400)
+    with chat_container:
+        st.markdown('<div class="chat-container">', unsafe_allow_html=True)
+        for message in st.session_state.chat_history:
+            role_class = "user-message" if message["role"] == "user" else "assistant-message"
+            st.markdown(f'<div class="chat-message {role_class}">{message["content"]}</div>', unsafe_allow_html=True)
+        st.markdown('</div>', unsafe_allow_html=True)
+
+if st.session_state.analise_completa:
+    if prompt := st.chat_input("Faça uma pergunta sobre o relatório..."):
+        st.session_state.chat_history.append({"role": "user", "content": prompt})
         
-        with st.expander("Visualizar Dados Carregados"):
-            st.dataframe(dados_brutos)
-
-        # --- LÓGICA CORRIGIDA ---
-        # 1. O SELETOR DE PESSOA FICA FORA DO BOTÃO
-        pessoa_selecionada = st.selectbox(
-            "Selecione o(a) avaliado(a) para analisar:",
-            options=dados_brutos['Assessment Taker Name'].unique()
+        response = responder_chat(
+            prompt, 
+            st.session_state.analise_completa["relatorio_dict"], 
+            st.session_state.analise_completa["dados_pessoa"]
         )
+        st.session_state.chat_history.append({"role": "assistant", "content": response})
+        st.rerun()
 
-        # 2. O BOTÃO APENAS DISPARA A AÇÃO
-        if st.button("Gerar Relatório de Análise"):
-            # Filtra os dados da pessoa que foi SELECIONADA
-            dados_pessoa = dados_brutos[dados_brutos['Assessment Taker Name'] == pessoa_selecionada]
-
-            if not dados_pessoa.empty and gemini_configurado:
-                relatorio_final = gerar_relatorio_final(dados_pessoa)
-                
-                st.subheader(f"Relatório para: {pessoa_selecionada}")
-                st.markdown(relatorio_final)
-            else:
-                st.error("Não foi possível gerar o relatório. Verifique os dados ou a configuração da API.")
-
-    except Exception as e:
-        st.error(f"Erro ao processar o arquivo: {e}")
+if not gemini_configurado:
+    st.warning("A funcionalidade de IA está desabilitada. Configure a chave de API para prosseguir.")

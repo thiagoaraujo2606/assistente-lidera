@@ -1,0 +1,15 @@
+# .streamlit/config.toml
+
+[server]
+headless = true
+
+[browser]
+gatherUsageStats = false
+
+# NOVO: Adicione as linhas abaixo para o tema
+[theme]
+primaryColor="#2A70B8" # Cor principal (botões, sliders)
+backgroundColor="#0E1117" # Cor de fundo principal
+secondaryBackgroundColor="#1C202D" # Cor de fundo de elementos como a barra lateral
+textColor="#FAFAFA" # Cor do texto principal
+font="sans serif"
